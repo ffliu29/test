@@ -1,0 +1,67 @@
+login("admin","123456");
+clearAllCache();
+undef(all);
+go;
+//清理流函数
+def cleanStreamEngines(engineNames){
+	for(name in engineNames){
+		try{
+			dropStreamEngine(name)
+		}
+		catch(ex){
+		}
+	}
+}
+//因子纵表建表函数
+def createTableForDoubleEmaFactor(){
+	factorSchema = table(
+	array(SYMBOL, 0) as SecurityID,
+	array(TIMESTAMP, 0) as TradeTime,
+	array(SYMBOL, 0) as factorName,
+	array(DOUBLE, 0) as val)
+	return factorSchema
+}
+def loadSnapshotTable(){
+	dbPath="dfs://snapshot_SH_L2_TSDB"
+	tableName="snapshot_SH_L2_TSDB"
+	tableHandle=loadTable(dbPath,tableName)
+	return tableHandle
+}
+//定义snapshot数据源的dummy和DS
+def getDummyAndDs(){
+	columnPhrase='SecurityID, TradeTime,"doubleEma" as factorName, LastPx from tableHandle where date(TradeTime)<2020.07.01' //查询各列指令
+	testString="select top 500 "+columnPhrase
+	testPhrase=parseExpr(testString)//查询指令
+	fullString="select "+columnPhrase
+	fullPhrase=parseExpr(fullString)//查询指令
+	schemaTable=eval(testPhrase)
+	DataSource=replayDS(fullPhrase,"TradeTime", "TradeTime")//全量数据源
+	return schemaTable,DataSource
+}
+//因子函数定义
+def sumDiff(x, y){
+	return (x-y)\(x+y)
+}
+@state
+def doubleEma(price){
+	ema_20=ema(price, 20)
+	ema_40=ema(price, 40)
+	sumDiff_1000=1000 * sumDiff(ema_20, ema_40)
+	finalFactor=ema(sumDiff_1000,10) -  ema(sumDiff_1000, 20)
+	return finalFactor
+}
+
+//以下计算代码
+
+resultTable = createTableForDoubleEmaFactor()
+tableHandle=loadSnapshotTable()
+snapshotDummyTable,inputDS=getDummyAndDs()
+//创建流引擎
+engineName="doubleEmaFactorDemo"
+cleanStreamEngines([engineName])//清理之前的同名引擎
+demoEngine = createReactiveStateEngine(name=engineName, metrics=<[TradeTime,factorName,doubleEma(LastPx)]>, dummyTable=snapshotDummyTable, outputTable=resultTable, keyColumn="SecurityID")
+demoJobName="streamingFactorDemoJob"
+//提交job供执行
+submitJob(demoJobName,"snapshot因子半年",replay,inputDS,demoEngine, `TradeTime, `TradeTime, -1,false, 4)
+//上述job完成后可在结果表中查到计算结果
+select top 50 * from resultTable where val > 0 
